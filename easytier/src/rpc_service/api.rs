@@ -37,6 +37,7 @@ use crate::{
 pub struct ApiRpcServer<T: TunnelListener + 'static> {
     rpc_server: StandAloneServer<T>,
     protected_tcp_port: Option<u16>,
+    rpc_addr: Option<SocketAddr>,
 }
 
 impl ApiRpcServer<TcpTunnelListener> {
@@ -56,6 +57,7 @@ impl ApiRpcServer<TcpTunnelListener> {
         );
         protected_port::register_protected_tcp_port(rpc_addr.port());
         server.protected_tcp_port = Some(rpc_addr.port());
+        server.rpc_addr = Some(rpc_addr);
 
         server
             .rpc_server
@@ -72,11 +74,16 @@ impl<T: TunnelListener + 'static> ApiRpcServer<T> {
         Self {
             rpc_server,
             protected_tcp_port: None,
+            rpc_addr: None,
         }
     }
 }
 
 impl<T: TunnelListener + 'static> ApiRpcServer<T> {
+    pub fn rpc_addr(&self) -> Option<SocketAddr> {
+        self.rpc_addr
+    }
+
     pub async fn serve(mut self) -> Result<Self, Error> {
         self.rpc_server.serve().await?;
         Ok(self)

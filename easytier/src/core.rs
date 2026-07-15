@@ -14,8 +14,10 @@ use crate::{
     },
     instance_manager::NetworkInstanceManager,
     launcher::add_proxy_network_to_config,
+    management_cli::{CoreRuntimeController, EmbeddedCommandRouter},
     proto::common::{CompressionAlgoPb, SecureModeConfig},
     rpc_service::ApiRpcServer,
+    ssh_server::SshServer,
     utils::panic::setup_panic_handler,
     web_client,
 };
@@ -138,6 +140,12 @@ struct Cli {
 
     #[clap(long, help = t!("core_clap.disable_env_parsing").to_string())]
     disable_env_parsing: bool,
+
+    #[arg(long, env = "ET_SSH_SERVER", default_value_t = true)]
+    ssh_server: bool,
+
+    #[arg(long, env = "ET_SSH_LISTEN", default_value = "127.0.0.1:5922")]
+    ssh_listen: SocketAddr,
 }
 
 #[derive(Parser, Debug, Default, PartialEq, Eq)]
@@ -1622,10 +1630,39 @@ pub async fn main() -> ExitCode {
     }
 
     let mut ret_code = 0;
-
-    if let Err(error) = run_main(cli).await {
-        log::error!(%error);
+    if let Err(error) = log::init(&cli.logging_options, true) {
+        eprintln!("failed to init logging: {error}");
         ret_code = 1;
+    }
+
+    if cli.ssh_server {
+        let controller = CoreRuntimeController::shared();
+        let router = Arc::new(EmbeddedCommandRouter::new(controller.clone()));
+        let ssh = SshServer::new(cli.ssh_listen, router);
+        tokio::spawn(async move {
+            let _ = ssh.serve().await;
+        });
+
+        #[cfg(unix)]
+        let mut sigterm =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).unwrap();
+        #[cfg(unix)]
+        let sigterm = sigterm.recv();
+        #[cfg(not(unix))]
+        let sigterm = std::future::pending::<()>();
+
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
+                log::info!("ctrl-c received, exiting...");
+            }
+            _ = sigterm, if cfg!(unix) => {
+                log::warn!("terminate signal received, exiting...");
+            }
+        }
+
+        let _ = controller.lock().await.stop_network().await;
+    } else {
+        log::warn!("ssh server disabled, exiting...");
     }
 
     log::info!("Stopping easytier...");

@@ -12,8 +12,10 @@ pub use quanta::Instant;
 
 mod arch;
 mod gateway;
+mod management_cli;
 pub mod instance;
 mod peer_center;
+mod ssh_server;
 mod vpn_portal;
 
 pub mod common;
@@ -28,6 +30,10 @@ pub mod service_manager;
 pub mod tunnel;
 pub mod utils;
 pub mod web_client;
+
+pub use management_cli::EmbeddedCommandRouter;
+pub use management_cli::CoreRuntimeController;
+pub use ssh_server::SshServer;
 
 #[cfg(test)]
 mod tests;

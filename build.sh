@@ -686,7 +686,9 @@ if [[ "$OFFLINE_BUILD" -eq 1 ]]; then
   CARGO_CMD+=(--offline)
 fi
 
-CARGO_CMD+=("${EXTRA_CARGO_ARGS[@]}")
+if [[ ${#EXTRA_CARGO_ARGS[@]} -gt 0 ]]; then
+  CARGO_CMD+=("${EXTRA_CARGO_ARGS[@]}")
+fi
 
 log_step "开始构建"
 log_info "method=${METHOD}"
@@ -697,7 +699,11 @@ log_info "protoc=${PROTOC_BIN}"
 [[ "$METHOD" == "official" ]] && log_info "upx=${USE_UPX}"
 log_info "running: ${CARGO_CMD[*]}"
 
-env "${BUILD_ENV[@]}" "${CARGO_CMD[@]}"
+if [[ ${#BUILD_ENV[@]} -gt 0 ]]; then
+  env "${BUILD_ENV[@]}" "${CARGO_CMD[@]}"
+else
+  "${CARGO_CMD[@]}"
+fi
 
 BUILT_BINARY="$(built_binary_path)"
 [[ -f "$BUILT_BINARY" ]] || die "build finished but binary not found: ${BUILT_BINARY}"
