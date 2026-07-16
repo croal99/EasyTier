@@ -112,8 +112,34 @@ impl CoreRuntimeController {
         Ok(())
     }
 
+    pub fn set_no_tun(&mut self, enabled: bool) {
+        let mut flags = self.config.get_flags();
+        flags.no_tun = enabled;
+        self.config.set_flags(flags);
+    }
+
+    pub fn get_no_tun(&self) -> bool {
+        self.config.get_flags().no_tun
+    }
+
     pub fn peers_clear(&mut self) {
         self.config.set_peers(Vec::new());
+    }
+
+    pub fn networks_add(&mut self, cidr: String) -> anyhow::Result<()> {
+        crate::launcher::add_proxy_network_to_config(&cidr, &self.config)
+    }
+
+    pub fn networks_remove(&mut self, cidr: String) -> anyhow::Result<()> {
+        let parsed: cidr::Ipv4Cidr = cidr
+            .parse()
+            .with_context(|| format!("invalid CIDR: {cidr}"))?;
+        self.config.remove_proxy_cidr(parsed);
+        Ok(())
+    }
+
+    pub fn networks_clear(&mut self) {
+        self.config.clear_proxy_cidrs();
     }
 
     /// Render current in-memory config state as human-readable text.
@@ -123,6 +149,7 @@ impl CoreRuntimeController {
         let peers = self.config.get_peers();
         let ipv4 = self.config.get_ipv4();
         let ipv6 = self.config.get_ipv6();
+        let networks = self.config.get_proxy_cidrs();
 
         let mut lines = Vec::new();
         lines.push(format!("network-name: {}", identity.network_name));
@@ -131,6 +158,7 @@ impl CoreRuntimeController {
             identity.network_secret.as_deref().unwrap_or("")
         ));
         lines.push(format!("dhcp: {}", dhcp));
+        lines.push(format!("no-tun: {}", self.get_no_tun()));
         lines.push(format!(
             "ipv4: {}",
             ipv4.map(|v| v.to_string()).unwrap_or_else(|| "off".to_string())
@@ -142,6 +170,13 @@ impl CoreRuntimeController {
         lines.push(format!("peers: {}", peers.len()));
         for (idx, p) in peers.iter().enumerate() {
             lines.push(format!("  {}: {}", idx + 1, p.uri));
+        }
+        lines.push(format!("networks: {}", networks.len()));
+        for (idx, n) in networks.iter().enumerate() {
+            match &n.mapped_cidr {
+                Some(mapped) => lines.push(format!("  {}: {}->{}", idx + 1, n.cidr, mapped)),
+                None => lines.push(format!("  {}: {}", idx + 1, n.cidr)),
+            }
         }
         lines.join("\n")
     }

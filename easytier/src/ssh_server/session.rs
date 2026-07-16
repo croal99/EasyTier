@@ -33,7 +33,7 @@ impl SessionHandle {
     }
 
     fn prompt() -> &'static str {
-        "easytier> "
+        "bluenet> "
     }
 
     fn write_prompt(
@@ -50,8 +50,11 @@ impl SessionHandle {
         text: String,
     ) -> Result<(), russh::Error> {
         if !text.is_empty() {
+            // Normalize line endings: PTY requires \r\n for proper display.
+            // Bare \n moves cursor down without returning to column 0, causing a staircase effect.
+            let text = text.replace("\r\n", "\n").replace('\n', "\r\n");
             session.data(channel, russh::CryptoVec::from(text))?;
-            session.data(channel, russh::CryptoVec::from("\n"))?;
+            session.data(channel, russh::CryptoVec::from("\r\n"))?;
         }
         Ok(())
     }

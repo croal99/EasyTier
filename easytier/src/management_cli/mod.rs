@@ -70,6 +70,11 @@ impl EmbeddedCommandRouter {
                 ctrl.set_ipv6(cidr)?;
                 Ok(CommandResult::text("OK".to_string()))
             }
+            ParsedCommand::ConfigSetNoTun { enabled } => {
+                let mut ctrl = self.controller.lock().await;
+                ctrl.set_no_tun(enabled);
+                Ok(CommandResult::text("OK".to_string()))
+            }
             ParsedCommand::ConfigPeersAdd { url } => {
                 let mut ctrl = self.controller.lock().await;
                 ctrl.peers_add(url)?;
@@ -85,11 +90,26 @@ impl EmbeddedCommandRouter {
                 ctrl.peers_clear();
                 Ok(CommandResult::text("OK".to_string()))
             }
+            ParsedCommand::ConfigNetworksAdd { cidr } => {
+                let mut ctrl = self.controller.lock().await;
+                ctrl.networks_add(cidr)?;
+                Ok(CommandResult::text("OK".to_string()))
+            }
+            ParsedCommand::ConfigNetworksRemove { cidr } => {
+                let mut ctrl = self.controller.lock().await;
+                ctrl.networks_remove(cidr)?;
+                Ok(CommandResult::text("OK".to_string()))
+            }
+            ParsedCommand::ConfigNetworksClear => {
+                let mut ctrl = self.controller.lock().await;
+                ctrl.networks_clear();
+                Ok(CommandResult::text("OK".to_string()))
+            }
             ParsedCommand::ReadOnlyMgmt { words } => {
                 let ctrl = self.controller.lock().await;
                 let rpc_addr = ctrl
                     .rpc_addr()
-                    .context("network is not started; run start-network first")?;
+                    .context("network is not started; run bluenet on first")?;
                 drop(ctrl);
                 let executor = ReadOnlyRpcExecutor::new(rpc_addr);
                 let out = executor.execute(words).await?;
