@@ -217,15 +217,25 @@ default_official_features() {
   fi
 }
 
-# Read a non-empty menu choice within the expected numeric range.
+# Read a menu choice within the expected numeric range, supporting an optional default.
 prompt_menu_index() {
   local title="$1"
   local count="$2"
+  local default_value="${3:-0}"
   local choice=""
+  local hint=""
+
+  if (( default_value >= 1 && default_value <= count )); then
+    hint=" [${default_value}]"
+  fi
 
   while true; do
-    ui_print "${COLOR_BOLD}${title}${COLOR_RESET}"
+    ui_print "${COLOR_BOLD}${title}${hint}${COLOR_RESET}"
     read -r -p "请输入编号: " choice
+    if [[ -z "$choice" ]] && (( default_value >= 1 && default_value <= count )); then
+      printf '%s' "$default_value"
+      return 0
+    fi
     if [[ "$choice" =~ ^[0-9]+$ ]] && (( choice >= 1 && choice <= count )); then
       printf '%s' "$choice"
       return 0
@@ -248,7 +258,7 @@ prompt_select() {
     ((idx++))
   done
 
-  choice="$(prompt_menu_index "$title" "${#options[@]}")"
+  choice="$(prompt_menu_index "$title" "${#options[@]}" 1)"
   printf '%s' "${options[choice-1]}"
 }
 
@@ -322,27 +332,27 @@ interactive_menu() {
   printf '  Host target: %s%s%s\n' "${COLOR_GREEN}" "$host_target" "${COLOR_RESET}"
   printf '  Toolchain: %s%s%s\n\n' "${COLOR_GREEN}" "$TOOLCHAIN" "${COLOR_RESET}"
 
-  METHOD="$(prompt_select "请选择编译方式" "debug" "release" "release-small" "official")"
+  BIN_NAME="$(prompt_select "请选择项目" "easytier-core" "easytier-cli")"
   printf '\n'
-  BIN_NAME="$(prompt_select "请选择二进制" "easytier-core" "easytier-cli")"
+  METHOD="$(prompt_select "请选择编译方式" "debug" "release" "release-small" "official")"
   printf '\n'
 
   printf '  %s1%s) host (%s)\n' "${COLOR_CYAN}" "${COLOR_RESET}" "$host_target"
-  printf '  %s2%s) x86_64-unknown-linux-musl\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-  printf '  %s3%s) aarch64-unknown-linux-musl\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-  printf '  %s4%s) x86_64-pc-windows-gnu\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-  printf '  %s5%s) x86_64-pc-windows-msvc\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  printf '  %s2%s) x86_64-pc-windows-msvc\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  printf '  %s3%s) x86_64-pc-windows-gnu\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  printf '  %s4%s) x86_64-unknown-linux-musl\n' "${COLOR_CYAN}" "${COLOR_RESET}"
+  printf '  %s5%s) aarch64-unknown-linux-musl\n' "${COLOR_CYAN}" "${COLOR_RESET}"
   printf '  %s6%s) 自定义 target\n' "${COLOR_CYAN}" "${COLOR_RESET}"
-  target_choice="$(prompt_menu_index "请选择目标平台" 6)"
+  target_choice="$(prompt_menu_index "请选择目标平台" 6 1)"
 
   case "$target_choice" in
     1) TARGET="$host_target" ;;
-    2) TARGET="x86_64-unknown-linux-musl" ;;
-    3) TARGET="aarch64-unknown-linux-musl" ;;
-    4) TARGET="x86_64-pc-windows-gnu" ;;
-    5) TARGET="x86_64-pc-windows-msvc" ;;
+    2) TARGET="x86_64-pc-windows-msvc" ;;
+    3) TARGET="x86_64-pc-windows-gnu" ;;
+    4) TARGET="x86_64-unknown-linux-musl" ;;
+    5) TARGET="aarch64-unknown-linux-musl" ;;
     6)
-      custom_target="$(prompt_input "请输入自定义 target triple" "$host_target")"
+      custom_target="$(prompt_input "请输入自定义 target triple" "")"
       [[ -n "$custom_target" ]] || die "target 不能为空"
       TARGET="$custom_target"
       ;;
@@ -352,7 +362,7 @@ interactive_menu() {
   clean_answer="$(prompt_yes_no "构建前是否清理已有产物？" "no")"
   [[ "$clean_answer" == "yes" ]] && CLEAN_BEFORE_BUILD=1 || CLEAN_BEFORE_BUILD=0
 
-  offline_answer="$(prompt_yes_no "是否使用离线模式？" "no")"
+  offline_answer="$(prompt_yes_no "是否使用离线模式？" "yes")"
   [[ "$offline_answer" == "yes" ]] && OFFLINE_BUILD=1 || OFFLINE_BUILD=0
 
   if [[ "$METHOD" == "official" ]]; then
@@ -553,12 +563,16 @@ compress_with_upx_if_needed() {
   if [[ -z "$upx_bin" ]]; then
     if [[ "$USE_UPX" == "yes" ]]; then
       log_warn "UPX not found in PATH, skipping compression"
+    else
+      log_info "UPX not found in PATH, skipping compression"
     fi
     return 0
   fi
 
   log_step "使用 UPX 压缩产物"
-  "$upx_bin" --lzma --best "$binary_path"
+  if ! "$upx_bin" --lzma --best "$binary_path"; then
+    log_warn "UPX compression failed, continuing..."
+  fi
 }
 
 # Copy the official build result into a stable artifact directory.
@@ -580,14 +594,25 @@ copy_official_artifact() {
 print_result_summary() {
   local binary_path="$1"
   local final_path="$binary_path"
+  local size_bytes=""
+  local size_str=""
 
   if [[ "$METHOD" == "official" ]]; then
     final_path="$(official_artifact_dir)/${BIN_NAME}$(binary_suffix)"
   fi
 
+  size_bytes="$(stat -f '%z' "$final_path")"
+  if (( size_bytes >= 1048576 )); then
+    size_str="$(awk -v b="$size_bytes" 'BEGIN {printf "%.2f MB", b/1048576}')"
+  elif (( size_bytes >= 1024 )); then
+    size_str="$(awk -v b="$size_bytes" 'BEGIN {printf "%.2f KB", b/1024}')"
+  else
+    size_str="${size_bytes} bytes"
+  fi
+
   printf '\n%sBuild Result%s\n' "${COLOR_BOLD}${COLOR_GREEN}" "${COLOR_RESET}"
-  file "$final_path"
-  stat -f '%N %z bytes' "$final_path"
+  printf '  Path: %s\n' "$final_path"
+  printf '  Size: %s\n' "$size_str"
 }
 
 init_colors
