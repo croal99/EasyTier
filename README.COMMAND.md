@@ -2,6 +2,17 @@
 
 本文档整理当前 `easytier-core` 内置 SSH server 支持的命令，面向通过 SSH 登录后执行的内置命令行。
 
+cargo 国内镜像
+
+```toml
+[source.crates-io]
+replace-with = 'rsproxy-sparse'
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+```
+
+
 注意：
 - 当前命令集合以仓库现状为准。
 - SSH server 启动后，EasyTier 核心网络默认**不会自动启动**。

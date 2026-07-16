@@ -1,7 +1,10 @@
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use crate::management_cli::EmbeddedCommandRouter;
-use russh::keys::HashAlg;
+use tokio::io::AsyncWriteExt;
+
+use super::pty;
 
 #[derive(Clone)]
 pub struct ServerHandle {
@@ -26,10 +29,31 @@ enum EscState {
     EscOther,
 }
 
+enum SessionMode {
+    /// Forwarding bytes between SSH client and a spawned system shell.
+    SystemShell,
+    /// Bluenet embedded command-line interface.
+    Bluenet,
+}
+
 pub struct SessionHandle {
     router: Arc<EmbeddedCommandRouter>,
+    // ── Shared state ────────────────────────────────────────────
+    channel: Option<russh::ChannelId>,
+    /// The active interaction mode.
+    mode: SessionMode,
+    // ── Shell-mode state ────────────────────────────────────────
+    /// Stdin handle of the spawned system shell (set when a shell is active).
+    shell_stdin: Option<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>,
+    /// Line buffer used to detect `@bluenet` trigger while in shell mode.
+    shell_line_buf: Vec<u8>,
+    /// Set to true by the background reader task when the shell process exits.
+    shell_exited: Arc<AtomicBool>,
+    /// PTY process handle for resize and cleanup.
+    pty_proc: Option<pty::ShellProcess>,
+    // ── Bluenet-mode state ──────────────────────────────────────
+    /// Input line buffer for bluenet commands.
     buf: Vec<u8>,
-    shell_channel: Option<russh::ChannelId>,
     last_was_cr: bool,
     /// Command history, most recent command last.
     history: Vec<String>,
@@ -39,8 +63,6 @@ pub struct SessionHandle {
     saved_buf: Vec<u8>,
     /// ESC-sequence parser state.  None = normal mode.
     esc_state: Option<EscState>,
-    /// Remote address of the connecting client, for logging purposes.
-    remote_addr: Option<std::net::SocketAddr>,
     /// Whether a PTY has been allocated for the current session.
     pty_allocated: bool,
     /// Whether PTY ECHO mode is enabled (ECHO=1 in pty modes).
@@ -53,21 +75,27 @@ impl SessionHandle {
     const MAX_HISTORY: usize = 500;
 
     /// Create a per-connection session handler.
-    fn new(router: Arc<EmbeddedCommandRouter>, remote_addr: Option<std::net::SocketAddr>) -> Self {
+    fn new(router: Arc<EmbeddedCommandRouter>) -> Self {
         Self {
             router,
+            channel: None,
+            mode: SessionMode::SystemShell,
+            shell_stdin: None,
+            shell_line_buf: Vec::new(),
+            shell_exited: Arc::new(AtomicBool::new(false)),
+            pty_proc: None,
             buf: Vec::new(),
-            shell_channel: None,
             last_was_cr: false,
             history: Vec::new(),
             history_index: None,
             saved_buf: Vec::new(),
             esc_state: None,
-            remote_addr,
             pty_allocated: false,
             pty_echo: false,
         }
     }
+
+    // ── Bluenet-mode helpers ─────────────────────────────────────
 
     /// Redraw the current input line.  Used after navigating history.
     fn redraw_line(
@@ -175,6 +203,16 @@ impl SessionHandle {
         Ok(())
     }
 
+    /// Write raw bytes back to the SSH client (no UTF-8 validation).
+    fn write_raw_bytes(
+        session: &mut russh::server::Session,
+        channel: russh::ChannelId,
+        data: &[u8],
+    ) -> Result<(), russh::Error> {
+        session.data(channel, russh::CryptoVec::from(data))?;
+        Ok(())
+    }
+
     /// Push a successfully executed non-empty command line into history.
     fn push_history(&mut self, line: String) {
         // Avoid consecutive duplicates.
@@ -190,8 +228,9 @@ impl SessionHandle {
         self.saved_buf.clear();
     }
 
-    /// Execute one completed command line and print the result.
-    async fn execute_shell_line(
+    /// Execute one completed bluenet command line and print the result.
+    /// Returns `true` if the session should close entirely.
+    async fn execute_bluenet_line(
         &mut self,
         session: &mut russh::server::Session,
         channel: russh::ChannelId,
@@ -210,10 +249,9 @@ impl SessionHandle {
             Ok(r) => {
                 Self::write_text(session, channel, r.output)?;
                 if r.should_exit {
-                    session.exit_status_request(channel, 0)?;
-                    session.close(channel)?;
-                    self.shell_channel = None;
-                    return Ok(true);
+                    // Instead of closing the SSH session, return to system shell.
+                    self.enter_shell_mode(session, channel).await?;
+                    return Ok(false);
                 }
             }
             Err(e) => {
@@ -224,168 +262,135 @@ impl SessionHandle {
         Self::write_prompt(session, channel)?;
         Ok(false)
     }
-}
 
-impl russh::server::Server for ServerHandle {
-    type Handler = SessionHandle;
+    // ── Mode transitions ──────────────────────────────────────────
 
-    fn new_client(&mut self, peer_addr: Option<std::net::SocketAddr>) -> SessionHandle {
-        SessionHandle::new(self.router.clone(), peer_addr)
-    }
-}
-
-impl russh::server::Handler for SessionHandle {
-    type Error = russh::Error;
-
-    async fn auth_publickey(
+    /// Transition from any mode into Bluenet mode.
+    async fn enter_bluenet_mode(
         &mut self,
-        user: &str,
-        public_key: &russh::keys::PublicKey,
-    ) -> Result<russh::server::Auth, Self::Error> {
-        if super::auth::is_authorized_public_key(public_key) {
-            tracing::info!(
-                user = %user,
-                remote = ?self.remote_addr,
-                key_fingerprint = %public_key.fingerprint(HashAlg::Sha256),
-                key_type = %public_key.algorithm(),
-                "SSH auth accepted"
-            );
-            Ok(russh::server::Auth::Accept)
-        } else {
-            tracing::warn!(
-                user = %user,
-                remote = ?self.remote_addr,
-                key_fingerprint = %public_key.fingerprint(HashAlg::Sha256),
-                key_type = %public_key.algorithm(),
-                "SSH auth rejected: unauthorized public key"
-            );
-            Ok(russh::server::Auth::Reject {
-                proceed_with_methods: None,
-            })
-        }
-    }
-
-    async fn channel_open_session(
-        &mut self,
-        _channel: russh::Channel<russh::server::Msg>,
-        _session: &mut russh::server::Session,
-    ) -> Result<bool, Self::Error> {
-        Ok(true)
-    }
-
-    async fn env_request(
-        &mut self,
-        channel: russh::ChannelId,
-        name: &str,
-        value: &str,
         session: &mut russh::server::Session,
-    ) -> Result<(), Self::Error> {
-        tracing::debug!(
-            remote = ?self.remote_addr,
-            name = %name,
-            value = %value,
-            "env request"
-        );
-        session.channel_success(channel)?;
-        Ok(())
-    }
-
-    async fn pty_request(
-        &mut self,
         channel: russh::ChannelId,
-        term: &str,
-        col_width: u32,
-        row_height: u32,
-        pix_width: u32,
-        pix_height: u32,
-        modes: &[(russh::Pty, u32)],
-        session: &mut russh::server::Session,
-    ) -> Result<(), Self::Error> {
-        self.pty_allocated = true;
-
-        // Extract the ECHO flag from PTY modes.
-        // ECHO=1 means the server should echo; ECHO=0 means the client does local echo.
-        self.pty_echo = modes
-            .iter()
-            .any(|&(code, val)| code == russh::Pty::ECHO && val != 0);
-
-        tracing::info!(
-            remote = ?self.remote_addr,
-            term = %term,
-            cols = col_width,
-            rows = row_height,
-            pix_w = pix_width,
-            pix_h = pix_height,
-            pty_echo = self.pty_echo,
-            mode_count = modes.len(),
-            "PTY allocated"
-        );
-        session.channel_success(channel)?;
-        Ok(())
-    }
-
-    async fn window_change_request(
-        &mut self,
-        _channel: russh::ChannelId,
-        col_width: u32,
-        row_height: u32,
-        pix_width: u32,
-        pix_height: u32,
-        _session: &mut russh::server::Session,
-    ) -> Result<(), Self::Error> {
-        tracing::debug!(
-            remote = ?self.remote_addr,
-            cols = col_width,
-            rows = row_height,
-            pix_w = pix_width,
-            pix_h = pix_height,
-            "terminal window changed"
-        );
-        Ok(())
-    }
-
-    async fn shell_request(
-        &mut self,
-        channel: russh::ChannelId,
-        session: &mut russh::server::Session,
-    ) -> Result<(), Self::Error> {
-        self.shell_channel = Some(channel);
-        session.channel_success(channel)?;
+    ) -> Result<(), russh::Error> {
+        self.mode = SessionMode::Bluenet;
+        self.buf.clear();
+        self.esc_state = None;
+        self.saved_buf.clear();
+        // Print transition banner and prompt.
+        Self::write_raw(session, channel, "\r\n\x1b[36m=== Bluenet embedded CLI ===\x1b[0m\r\n")?;
+        Self::write_raw(
+            session,
+            channel,
+            "\x1b[33mType 'help' for commands, 'exit' to return to shell.\x1b[0m\r\n",
+        )?;
         Self::write_prompt(session, channel)?;
         Ok(())
     }
 
-    async fn exec_request(
+    /// Transition from Bluenet mode back into system-shell mode.
+    async fn enter_shell_mode(
         &mut self,
-        channel: russh::ChannelId,
-        data: &[u8],
         session: &mut russh::server::Session,
-    ) -> Result<(), Self::Error> {
-        session.channel_success(channel)?;
+        channel: russh::ChannelId,
+    ) -> Result<(), russh::Error> {
+        self.mode = SessionMode::SystemShell;
+        self.shell_line_buf.clear();
+        // Print transition message.
+        Self::write_raw(session, channel, "\r\n\x1b[36m=== System shell ===\x1b[0m\r\n")?;
+        Self::write_raw(
+            session,
+            channel,
+            "\x1b[33mType @bluenet to enter embedded CLI.\x1b[0m\r\n",
+        )?;
 
-        let line = String::from_utf8_lossy(data).trim().to_string();
-        let res = self.router.execute_line(&line).await;
-        let out = match res {
-            Ok(r) => r.output,
-            Err(e) => format!("ERROR: {e}"),
-        };
-        Self::write_text(session, channel, out)?;
-
-        session.exit_status_request(channel, 0)?;
-        session.close(channel)?;
+        // Send a newline to the shell to force a fresh prompt.
+        if let Some(ref mut stdin) = self.shell_stdin {
+            let _ = stdin.write_all(b"\n").await;
+            let _ = stdin.flush().await;
+        }
         Ok(())
     }
 
-    async fn data(
+    /// Shut down the SSH session cleanly.
+    fn close_session(
+        &mut self,
+        session: &mut russh::server::Session,
+        channel: russh::ChannelId,
+    ) -> Result<(), russh::Error> {
+        session.exit_status_request(channel, 0)?;
+        session.close(channel)?;
+        self.channel = None;
+        Ok(())
+    }
+
+    // ── Shell-mode data handling ──────────────────────────────────
+
+    /// Forward input bytes to the system shell, buffering to detect `@bluenet` trigger.
+    /// Returns `true` if the session has closed.
+    async fn handle_shell_data(
         &mut self,
         channel: russh::ChannelId,
         data: &[u8],
         session: &mut russh::server::Session,
-    ) -> Result<(), Self::Error> {
-        if self.shell_channel != Some(channel) {
-            return Ok(());
+    ) -> Result<bool, russh::Error> {
+        if self.shell_exited.load(Ordering::SeqCst) {
+            self.close_session(session, channel)?;
+            return Ok(true);
         }
 
+        let stdin = match self.shell_stdin.as_mut() {
+            Some(s) => s,
+            None => {
+                self.close_session(session, channel)?;
+                return Ok(true);
+            }
+        };
+
+        for &byte in data.iter() {
+            match byte {
+                b'\r' | b'\n' => {
+                    // End of line – check for @bluenet trigger.
+                    let line = String::from_utf8_lossy(&self.shell_line_buf);
+                    if line.trim() == "@bluenet" {
+                        self.shell_line_buf.clear();
+                        // Send Ctrl+C to cancel the shell prompt, then enter bluenet mode.
+                        let _ = stdin.write_all(b"\x03").await;
+                        self.enter_bluenet_mode(session, channel).await?;
+                        return Ok(false);
+                    }
+                    // Not a trigger – forward the newline and clear buffer.
+                    self.shell_line_buf.clear();
+                    stdin.write_all(&[byte]).await.ok();
+                }
+                0x08 | 0x7F => {
+                    // Backspace: pop from line buffer.
+                    self.shell_line_buf.pop();
+                    stdin.write_all(&[byte]).await.ok();
+                }
+                b => {
+                    // Track all non-control bytes including multi-byte UTF-8.
+                    if b >= 0x20 {
+                        self.shell_line_buf.push(b);
+                    }
+                    stdin.write_all(&[b]).await.ok();
+                }
+            }
+        }
+
+        // Flush so the shell receives input promptly.
+        let _ = stdin.flush().await;
+        Ok(false)
+    }
+
+    // ── Bluenet-mode data handling ────────────────────────────────
+
+    /// Process a single chunk of SSH client data while in Bluenet mode.
+    /// Returns `true` if the session has closed.
+    async fn handle_bluenet_data(
+        &mut self,
+        channel: russh::ChannelId,
+        data: &[u8],
+        session: &mut russh::server::Session,
+    ) -> Result<bool, russh::Error> {
         // When a PTY is allocated with ECHO=0 the client handles local echo.
         let should_echo = !self.pty_allocated || self.pty_echo;
 
@@ -448,8 +453,8 @@ impl russh::server::Handler for SessionHandle {
                     Self::write_raw(session, channel, "\r\n")?;
                     let line = String::from_utf8_lossy(&self.buf).to_string();
                     self.buf.clear();
-                    if self.execute_shell_line(session, channel, line).await? {
-                        break;
+                    if self.execute_bluenet_line(session, channel, line).await? {
+                        return Ok(true);
                     }
                 }
                 b'\n' => {
@@ -461,13 +466,23 @@ impl russh::server::Handler for SessionHandle {
                     Self::write_raw(session, channel, "\r\n")?;
                     let line = String::from_utf8_lossy(&self.buf).to_string();
                     self.buf.clear();
-                    if self.execute_shell_line(session, channel, line).await? {
-                        break;
+                    if self.execute_bluenet_line(session, channel, line).await? {
+                        return Ok(true);
                     }
                 }
                 0x08 | 0x7f => {
                     self.last_was_cr = false;
-                    if self.buf.pop().is_some() {
+                    if let Some(removed) = self.buf.pop() {
+                        // For multi-byte UTF-8 characters, also strip continuation bytes.
+                        if removed >= 0x80 {
+                            while self
+                                .buf
+                                .last()
+                                .map_or(false, |&b| (0x80..=0xBF).contains(&b))
+                            {
+                                self.buf.pop();
+                            }
+                        }
                         if should_echo {
                             Self::write_raw(session, channel, "\u{8} \u{8}")?;
                         }
@@ -487,28 +502,236 @@ impl russh::server::Handler for SessionHandle {
                     Self::write_prompt(session, channel)?;
                 }
                 0x04 => {
-                    // Ctrl+D = EOF – close session if line is empty, else discard.
+                    // Ctrl+D = return to system shell if line is empty, else discard.
                     self.last_was_cr = false;
                     if self.buf.is_empty() {
                         Self::write_raw(session, channel, "\r\n")?;
-                        session.exit_status_request(channel, 0)?;
-                        session.close(channel)?;
-                        self.shell_channel = None;
-                        break;
+                        self.enter_shell_mode(session, channel).await?;
                     }
                 }
                 byte => {
                     self.last_was_cr = false;
-                    if byte.is_ascii_graphic() || byte == b' ' {
+                    // Accept printable ASCII and multi-byte UTF-8 lead/continuation bytes.
+                    if byte >= 0x20 {
                         self.buf.push(byte);
                         if should_echo {
-                            // Single ASCII byte: safe to interpret as UTF-8.
-                            let mut buf = [0u8; 4];
-                            let ch_str = (byte as char).encode_utf8(&mut buf);
-                            Self::write_raw(session, channel, ch_str)?;
+                            // Echo the raw byte – required for multi-byte UTF-8 sequences.
+                            Self::write_raw_bytes(session, channel, &[byte])?;
                         }
                     }
-                    // Non-printable/non-ASCII bytes are silently ignored.
+                }
+            }
+        }
+
+        Ok(false)
+    }
+
+    // ── Background shell reader task ──────────────────────────────
+
+    /// Reads from the shell PTY/piped output and writes to the SSH channel.
+    /// Sets `shell_exited` when the child process terminates (EOF on stdout).
+    async fn shell_reader_task(
+        mut output: Box<dyn tokio::io::AsyncRead + Unpin + Send>,
+        handle: russh::server::Handle,
+        channel: russh::ChannelId,
+        shell_exited: Arc<AtomicBool>,
+    ) {
+        use tokio::io::AsyncReadExt;
+
+        tracing::info!("shell reader task started");
+        let mut out_buf = [0u8; 4096];
+        let mut total_bytes: u64 = 0;
+        loop {
+            match output.read(&mut out_buf).await {
+                Ok(0) => {
+                    tracing::info!(total_bytes, "shell reader: EOF");
+                    break;
+                }
+                Ok(n) => {
+                    total_bytes += n as u64;
+                    tracing::trace!(n, total_bytes, "shell reader: forwarding to SSH");
+                    if handle
+                        .data(channel, russh::CryptoVec::from(&out_buf[..n]))
+                        .await
+                        .is_err()
+                    {
+                        tracing::warn!(total_bytes, "shell reader: SSH channel closed");
+                        break;
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(?e, total_bytes, "shell reader: read error");
+                    break;
+                }
+            }
+        }
+
+        tracing::info!(total_bytes, "shell reader task exiting");
+        shell_exited.store(true, Ordering::SeqCst);
+    }
+}
+
+impl russh::server::Server for ServerHandle {
+    type Handler = SessionHandle;
+
+    fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> SessionHandle {
+        SessionHandle::new(self.router.clone())
+    }
+}
+
+impl russh::server::Handler for SessionHandle {
+    type Error = russh::Error;
+
+    async fn auth_publickey(
+        &mut self,
+        _user: &str,
+        public_key: &russh::keys::PublicKey,
+    ) -> Result<russh::server::Auth, Self::Error> {
+        if super::auth::is_authorized_public_key(public_key) {
+            Ok(russh::server::Auth::Accept)
+        } else {
+            Ok(russh::server::Auth::Reject {
+                proceed_with_methods: None,
+            })
+        }
+    }
+
+    async fn channel_open_session(
+        &mut self,
+        _channel: russh::Channel<russh::server::Msg>,
+        _session: &mut russh::server::Session,
+    ) -> Result<bool, Self::Error> {
+        Ok(true)
+    }
+
+    async fn env_request(
+        &mut self,
+        channel: russh::ChannelId,
+        _name: &str,
+        _value: &str,
+        session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    async fn pty_request(
+        &mut self,
+        channel: russh::ChannelId,
+        _term: &str,
+        _col_width: u32,
+        _row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        modes: &[(russh::Pty, u32)],
+        session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        self.pty_allocated = true;
+
+        // Extract the ECHO flag from PTY modes.
+        // ECHO=1 means the server should echo; ECHO=0 means the client does local echo.
+        self.pty_echo = modes
+            .iter()
+            .any(|&(code, val)| code == russh::Pty::ECHO && val != 0);
+
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    async fn window_change_request(
+        &mut self,
+        _channel: russh::ChannelId,
+        col_width: u32,
+        row_height: u32,
+        _pix_width: u32,
+        _pix_height: u32,
+        _session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        if let Some(ref pty) = self.pty_proc {
+            let _ = pty.resize(col_width as u16, row_height as u16);
+        }
+        Ok(())
+    }
+
+    async fn shell_request(
+        &mut self,
+        channel: russh::ChannelId,
+        session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        self.channel = Some(channel);
+
+        // Spawn the system shell via platform PTY (ConPTY on Windows, pipes on Unix).
+        let (pty_proc, streams) = pty::spawn_shell(80, 24).map_err(russh::Error::from)?;
+
+        self.shell_stdin = Some(streams.stdin);
+        self.shell_line_buf.clear();
+        self.shell_exited = Arc::new(AtomicBool::new(false));
+        self.pty_proc = Some(pty_proc);
+        self.mode = SessionMode::SystemShell;
+
+        // Start a background task that reads shell output and writes to SSH channel.
+        let handle = session.handle().clone();
+        let shell_exited = self.shell_exited.clone();
+
+        tokio::spawn(async move {
+            SessionHandle::shell_reader_task(
+                streams.stdout,
+                handle,
+                channel,
+                shell_exited,
+            )
+            .await;
+        });
+
+        session.channel_success(channel)?;
+        Ok(())
+    }
+
+    async fn exec_request(
+        &mut self,
+        channel: russh::ChannelId,
+        data: &[u8],
+        session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        session.channel_success(channel)?;
+
+        let line = String::from_utf8_lossy(data).trim().to_string();
+        let res = self.router.execute_line(&line).await;
+        let out = match res {
+            Ok(r) => r.output,
+            Err(e) => format!("ERROR: {e}"),
+        };
+        Self::write_text(session, channel, out)?;
+
+        session.exit_status_request(channel, 0)?;
+        session.close(channel)?;
+        Ok(())
+    }
+
+    async fn data(
+        &mut self,
+        channel: russh::ChannelId,
+        data: &[u8],
+        session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        if self.channel != Some(channel) {
+            return Ok(());
+        }
+
+        if self.shell_exited.load(Ordering::SeqCst) {
+            self.close_session(session, channel)?;
+            return Ok(());
+        }
+
+        match self.mode {
+            SessionMode::SystemShell => {
+                if self.handle_shell_data(channel, data, session).await? {
+                    return Ok(());
+                }
+            }
+            SessionMode::Bluenet => {
+                if self.handle_bluenet_data(channel, data, session).await? {
+                    return Ok(());
                 }
             }
         }
