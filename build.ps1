@@ -276,10 +276,10 @@ function Show-InteractiveMenu($hostTarget) {
     Write-Host ("  Toolchain:   " + (c $C_GREEN $Toolchain))
     Write-Host ""
 
-    $Method = Menu-Select "请选择编译方式" @("debug", "release", "release-small", "official")
+    $Bin = Menu-Select "请选择项目" @("easytier-core", "easytier-cli")
     Write-Host ""
 
-    $Bin = Menu-Select "请选择二进制" @("easytier-core", "easytier-cli")
+    $Method = Menu-Select "请选择编译方式" @("debug", "release", "release-small", "official")
     Write-Host ""
 
     # Target selection
