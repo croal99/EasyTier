@@ -693,17 +693,26 @@ impl russh::server::Handler for SessionHandle {
         data: &[u8],
         session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
-        session.channel_success(channel)?;
-
         let line = String::from_utf8_lossy(data).trim().to_string();
-        let res = self.router.execute_line(&line).await;
-        let out = match res {
-            Ok(r) => r.output,
-            Err(e) => format!("ERROR: {e}"),
-        };
-        Self::write_text(session, channel, out)?;
+        tracing::info!(command = %line, "SSH exec request");
 
-        session.exit_status_request(channel, 0)?;
+        let output = pty::spawn_exec(&line).await;
+
+        match output {
+            Ok(text) => {
+                session.channel_success(channel)?;
+                if !text.is_empty() {
+                    Self::write_text(session, channel, text)?;
+                }
+                session.exit_status_request(channel, 0)?;
+            }
+            Err(e) => {
+                tracing::error!(command = %line, ?e, "exec failed");
+                session.channel_failure(channel)?;
+                return Ok(());
+            }
+        }
+
         session.close(channel)?;
         Ok(())
     }

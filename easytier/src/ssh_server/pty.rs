@@ -30,7 +30,7 @@ pub fn spawn_shell(cols: u16, rows: u16) -> io::Result<(ShellProcess, ShellStrea
     use xpty::{PtySize, PtySystem};
 
     let pty_system = xpty::native_pty_system();
-    let mut pair = pty_system
+    let pair = pty_system
         .openpty(PtySize {
             rows,
             cols,
@@ -39,7 +39,7 @@ pub fn spawn_shell(cols: u16, rows: u16) -> io::Result<(ShellProcess, ShellStrea
         })
         .map_err(map_err)?;
 
-    tracing::info!(cols, rows, "xpty PTY opened");
+    // tracing::info!(cols, rows, "xpty PTY opened");
 
     let cmd = make_shell_command();
     let child = pair.slave.spawn_command(cmd).map_err(map_err)?;
@@ -122,10 +122,52 @@ fn make_shell_command() -> xpty::CommandBuilder {
     #[cfg(not(windows))]
     {
         let mut cmd = xpty::CommandBuilder::new("/bin/sh");
+        cmd.env("TERM", "xterm-256color");
+        cmd.env("HOME", &std::env::var("HOME").unwrap_or_else(|_| "/root".into()));
         cmd.env("LANG", "C.UTF-8");
         cmd.env("LC_ALL", "C.UTF-8");
+        cmd.env("HISTFILE", "/dev/null"); // Disable shell history
         cmd
     }
+}
+
+/// Spawn a command via the system shell and return combined stdout+stderr.
+///
+/// Uses plain `std::process::Command` (matching Go's `os/exec`) — no PTY is
+/// needed for one-off `exec` requests.  The blocking call runs on
+/// `spawn_blocking` to keep the async runtime responsive.
+pub async fn spawn_exec(command: &str) -> io::Result<String> {
+    #[cfg(windows)]
+    let (shell, shell_arg) = {
+        let s = std::env::var("COMSPEC")
+            .unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into());
+        (s, "/c")
+    };
+    #[cfg(not(windows))]
+    let (shell, shell_arg) = ("/bin/sh".to_string(), "-c");
+
+    let cmd = command.to_string();
+
+    let output = tokio::task::spawn_blocking({
+        let cmd = cmd.clone();
+        move || {
+            std::process::Command::new(&shell)
+                .arg(shell_arg)
+                .arg(&cmd)
+                .env("LANG", "C.UTF-8")
+                .env("LC_ALL", "C.UTF-8")
+                .output()
+                .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))
+        }
+    })
+    .await
+    .map_err(|e| io::Error::new(io::ErrorKind::Other, e.to_string()))??;
+
+    let mut text = Vec::with_capacity(output.stdout.len() + output.stderr.len());
+    text.extend_from_slice(&output.stdout);
+    text.extend_from_slice(&output.stderr);
+
+    Ok(String::from_utf8_lossy(&text).into_owned())
 }
 
 // ── Sync → Async bridges ──────────────────────────────────────────────────
@@ -183,7 +225,7 @@ fn spawn_writer_thread(
             }
             let _ = writer.flush();
         }
-        tracing::debug!(total, "xpty writer: channel closed");
+        // tracing::debug!(total, "xpty writer: channel closed");
     });
 
     Box::new(PtyWriter { tx })
