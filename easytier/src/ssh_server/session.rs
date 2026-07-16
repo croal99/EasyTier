@@ -1,6 +1,7 @@
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
+use crate::common::constants::EASYTIER_VERSION;
 use crate::management_cli::EmbeddedCommandRouter;
 use tokio::io::AsyncWriteExt;
 
@@ -682,6 +683,16 @@ impl russh::server::Handler for SessionHandle {
             )
             .await;
         });
+
+        // Send version banner to the client via the SSH data channel.
+        let version_banner = format!(
+            "\r\n\x1b[1;32mBlueGate SSH\x1b[0m  version: {}\r\n\r\n",
+            EASYTIER_VERSION
+        );
+        session.data(
+            channel,
+            russh::CryptoVec::from(version_banner),
+        )?;
 
         session.channel_success(channel)?;
         Ok(())
