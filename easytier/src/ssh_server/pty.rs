@@ -9,6 +9,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
+use crate::common::log::info;
 
 // ── Public types ──────────────────────────────────────────────────────────
 
@@ -143,9 +144,15 @@ pub async fn spawn_exec(command: &str) -> io::Result<String> {
             .unwrap_or_else(|_| "C:\\Windows\\System32\\cmd.exe".into());
         (s, "/c")
     };
+    
     #[cfg(not(windows))]
     let (shell, shell_arg) = ("/bin/sh".to_string(), "-c");
 
+    #[cfg(windows)]
+    // 在 Windows 上，执行命令前先通过 chcp 65001 将控制台代码页切换到 UTF-8
+    let cmd = format!("chcp 65001 >nul && {}", command);
+
+    #[cfg(not(windows))]
     let cmd = command.to_string();
 
     let output = tokio::task::spawn_blocking({
@@ -167,7 +174,9 @@ pub async fn spawn_exec(command: &str) -> io::Result<String> {
     text.extend_from_slice(&output.stdout);
     text.extend_from_slice(&output.stderr);
 
-    Ok(String::from_utf8_lossy(&text).into_owned())
+    let text = String::from_utf8_lossy(&text).into_owned();
+    // info!("Output text: {}", text);
+    Ok(text)
 }
 
 // ── Sync → Async bridges ──────────────────────────────────────────────────

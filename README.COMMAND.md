@@ -12,6 +12,21 @@ replace-with = 'rsproxy-sparse'
 registry = "sparse+https://rsproxy.cn/index/"
 ```
 
+显示日志信息
+
+```powershell
+# PowerShell - 显示所有 easytier 模块的 info 级别日志
+$env:RUST_LOG="easytier=info"
+.\easytier.exe ...
+
+# 只显示 ssh_server 模块
+$env:RUST_LOG="easytier::ssh_server=info"
+.\easytier.exe ...
+
+# 更精细，显示 debug 级别
+$env:RUST_LOG="easytier::ssh_server=debug"
+.\easytier.exe ...
+```
 
 注意：
 - 当前命令集合以仓库现状为准。
