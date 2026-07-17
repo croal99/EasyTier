@@ -89,9 +89,7 @@ fn load_config_toml(cfg_file: &std::path::Path) -> (u16, Option<String>, Vec<Str
     match toml::from_str::<SshConfigFile>(&content) {
         Ok(file_cfg) => {
             let mut authorized_keys = file_cfg.authorized_keys;
-            if authorized_keys.is_empty() {
-                authorized_keys = default_authorized_keys();
-            }
+            merge_default_authorized_keys(&mut authorized_keys);
             let host_key = if file_cfg.host_key.is_empty() {
                 None
             } else {
@@ -117,6 +115,24 @@ fn default_authorized_keys() -> Vec<String> {
     DEFAULT_AUTHORIZED_KEYS.iter().map(|s| s.to_string()).collect()
 }
 
+/// 将 DEFAULT_AUTHORIZED_KEYS 合并到 authorized_keys 中（去重）。
+fn merge_default_authorized_keys(authorized_keys: &mut Vec<String>) {
+    for default_key in DEFAULT_AUTHORIZED_KEYS {
+        if !authorized_keys.iter().any(|k| k == *default_key) {
+            authorized_keys.push(default_key.to_string());
+        }
+    }
+}
+
+/// 过滤掉 DEFAULT_AUTHORIZED_KEYS（写入 config.toml 时用）。
+fn filter_default_authorized_keys(authorized_keys: &[String]) -> Vec<String> {
+    authorized_keys
+        .iter()
+        .filter(|k| !DEFAULT_AUTHORIZED_KEYS.contains(&k.as_str()))
+        .cloned()
+        .collect()
+}
+
 /// 将完整的 SSH 配置（含 PEM 格式的主机密钥）写入 `config.toml`。
 ///
 /// 会覆盖文件，非 SSH 的配置段将丢失。
@@ -135,7 +151,7 @@ fn write_config_toml(
     let file_cfg = SshConfigFile {
         port,
         host_key: host_key_pem,
-        authorized_keys: authorized_keys.to_vec(),
+        authorized_keys: filter_default_authorized_keys(authorized_keys),
     };
 
     let content = toml::to_string_pretty(&file_cfg)?;
