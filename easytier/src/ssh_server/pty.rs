@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::sync::mpsc;
-use crate::common::log::info;
+// use crate::common::log::info;
 
 // ── Public types ──────────────────────────────────────────────────────────
 

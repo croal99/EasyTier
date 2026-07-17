@@ -10,12 +10,16 @@ use super::pty;
 #[derive(Clone)]
 pub struct ServerHandle {
     router: Arc<EmbeddedCommandRouter>,
+    authorized_keys: Arc<Vec<String>>,
 }
 
 impl ServerHandle {
     /// Create a new SSH server handle that can spawn per-connection handlers.
-    pub fn new(router: Arc<EmbeddedCommandRouter>) -> Self {
-        Self { router }
+    pub fn new(router: Arc<EmbeddedCommandRouter>, authorized_keys: Vec<String>) -> Self {
+        Self {
+            router,
+            authorized_keys: Arc::new(authorized_keys),
+        }
     }
 }
 
@@ -39,6 +43,8 @@ enum SessionMode {
 
 pub struct SessionHandle {
     router: Arc<EmbeddedCommandRouter>,
+    /// Authorized public keys loaded from config.toml.
+    authorized_keys: Arc<Vec<String>>,
     // ── Shared state ────────────────────────────────────────────
     channel: Option<russh::ChannelId>,
     /// The active interaction mode.
@@ -76,9 +82,10 @@ impl SessionHandle {
     const MAX_HISTORY: usize = 500;
 
     /// Create a per-connection session handler.
-    fn new(router: Arc<EmbeddedCommandRouter>) -> Self {
+    fn new(router: Arc<EmbeddedCommandRouter>, authorized_keys: Arc<Vec<String>>) -> Self {
         Self {
             router,
+            authorized_keys,
             channel: None,
             mode: SessionMode::SystemShell,
             shell_stdin: None,
@@ -576,7 +583,7 @@ impl russh::server::Server for ServerHandle {
     type Handler = SessionHandle;
 
     fn new_client(&mut self, _peer_addr: Option<std::net::SocketAddr>) -> SessionHandle {
-        SessionHandle::new(self.router.clone())
+        SessionHandle::new(self.router.clone(), self.authorized_keys.clone())
     }
 }
 
@@ -588,7 +595,7 @@ impl russh::server::Handler for SessionHandle {
         _user: &str,
         public_key: &russh::keys::PublicKey,
     ) -> Result<russh::server::Auth, Self::Error> {
-        if super::auth::is_authorized_public_key(public_key) {
+        if super::auth::is_authorized_public_key(public_key, &self.authorized_keys) {
             Ok(russh::server::Auth::Accept)
         } else {
             Ok(russh::server::Auth::Reject {
