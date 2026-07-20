@@ -7,7 +7,7 @@ cd "$ROOT_DIR"
 
 TOOLCHAIN="${TOOLCHAIN:-1.95}"
 METHOD="release"
-BIN_NAME="easytier-core"
+BIN_NAME="netcore"
 TARGET=""
 CLEAN_BEFORE_BUILD=0
 OFFLINE_BUILD=0
@@ -47,7 +47,7 @@ Usage:
 
 Options:
   -m, --method <name>      Build method: debug | release | release-small | official
-  -b, --bin <name>         Binary name: easytier-core | easytier-cli
+  -b, --bin <name>         Binary name: netcore | easytier-cli
   -t, --target <triple>    Rust target triple, for example x86_64-unknown-linux-musl
       --features <list>    Override cargo features, for example "jemalloc" or "mimalloc"
       --clean              Clean the easytier build artifacts before building
@@ -79,9 +79,9 @@ Methods:
 
 Examples:
   ./build.sh
-  ./build.sh --method release --bin easytier-core
-  ./build.sh --method release-small --bin easytier-core --target x86_64-unknown-linux-musl
-  ./build.sh --method official --bin easytier-core --target x86_64-unknown-linux-musl --clean
+  ./build.sh --method release --bin netcore
+  ./build.sh --method release-small --bin netcore --target x86_64-unknown-linux-musl
+  ./build.sh --method official --bin netcore --target x86_64-unknown-linux-musl --clean
   ./build.sh --method official --bin easytier-cli --target aarch64-unknown-linux-musl --features mimalloc
 EOF
 }
@@ -177,7 +177,7 @@ validate_method() {
 # Validate that the requested binary is supported by the easytier package.
 validate_bin() {
   case "$1" in
-    easytier-core|easytier-cli) ;;
+    netcore|easytier-cli) ;;
     *)
       die "unsupported binary: $1"
       ;;
@@ -332,7 +332,7 @@ interactive_menu() {
   printf '  Host target: %s%s%s\n' "${COLOR_GREEN}" "$host_target" "${COLOR_RESET}"
   printf '  Toolchain: %s%s%s\n\n' "${COLOR_GREEN}" "$TOOLCHAIN" "${COLOR_RESET}"
 
-  BIN_NAME="$(prompt_select "请选择项目" "easytier-core" "easytier-cli")"
+  BIN_NAME="$(prompt_select "请选择项目" "netcore" "easytier-cli")"
   printf '\n'
   METHOD="$(prompt_select "请选择编译方式" "debug" "release" "release-small" "official")"
   printf '\n'

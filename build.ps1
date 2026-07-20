@@ -11,7 +11,7 @@
     编译方式: debug | release | release-small | official
 
 .PARAMETER Bin
-    二进制名称: easytier-core | easytier-cli
+    二进制名称: netcore | easytier-cli
 
 .PARAMETER Target
     Rust target triple，例如 x86_64-pc-windows-msvc
@@ -42,8 +42,8 @@ param(
     [ValidateSet("debug", "release", "release-small", "official")]
     [string]$Method = "release",
 
-    [ValidateSet("easytier-core", "easytier-cli")]
-    [string]$Bin = "easytier-core",
+    [ValidateSet("netcore", "easytier-cli")]
+    [string]$Bin = "netcore",
 
     [string]$Target = "",
 
@@ -114,7 +114,7 @@ Usage:
 
 Options:
   -Method <name>           Build method: debug | release | release-small | official
-  -Bin <name>              Binary name: easytier-core | easytier-cli
+  -Bin <name>              Binary name: netcore | easytier-cli
   -Target <triple>         Rust target triple, for example x86_64-pc-windows-msvc
   -Features <list>         Override cargo features, for example "jemalloc" or "mimalloc"
   -Clean                   Clean the easytier build artifacts before building
@@ -136,9 +136,9 @@ Methods:
 
 Examples:
   .\build.ps1
-  .\build.ps1 -Method release -Bin easytier-core
-  .\build.ps1 -Method release-small -Bin easytier-core -Target x86_64-pc-windows-msvc
-  .\build.ps1 -Method official -Bin easytier-core -Target x86_64-pc-windows-msvc -Clean
+  .\build.ps1 -Method release -Bin netcore
+  .\build.ps1 -Method release-small -Bin netcore -Target x86_64-pc-windows-msvc
+  .\build.ps1 -Method official -Bin netcore -Target x86_64-pc-windows-msvc -Clean
   .\build.ps1 -Method official -Bin easytier-cli -Target x86_64-pc-windows-msvc -Features mimalloc
 '@
 }
@@ -276,7 +276,7 @@ function Show-InteractiveMenu($hostTarget) {
     Write-Host ("  Toolchain:   " + (c $C_GREEN $Toolchain))
     Write-Host ""
 
-    $Bin = Menu-Select "请选择项目" @("easytier-core", "easytier-cli")
+    $Bin = Menu-Select "请选择项目" @("netcore", "easytier-cli")
     Write-Host ""
 
     $Method = Menu-Select "请选择编译方式" @("debug", "release", "release-small", "official")

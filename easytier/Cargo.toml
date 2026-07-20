@@ -16,7 +16,7 @@ build = "build/main.rs"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [[bin]]
-name = "easytier-core"
+name = "netcore"
 path = "src/easytier-core.rs"
 test = false
 
