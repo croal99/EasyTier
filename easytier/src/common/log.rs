@@ -47,15 +47,25 @@ macro_rules! __log__ {
 __log__!(const LOG_TARGET = "CORE");
 
 fn parse_env_filter(default_level: Option<LevelFilter>) -> Result<EnvFilter, anyhow::Error> {
-    let directive = match default_level {
-        Some(level) => level.into(),
-        None => format!("{LOG_TARGET}=info").parse()?,
-    };
+    // Read RUST_LOG env var; if set, it takes full control over filter directives.
+    let rust_log = std::env::var("RUST_LOG")
+        .ok()
+        .filter(|s| !s.is_empty());
 
-    EnvFilter::builder()
-        .with_default_directive(directive)
-        .from_env()
-        .with_context(|| "failed to create env filter")
+    match (default_level, rust_log) {
+        // RUST_LOG is set → use it as-is (user explicitly controls filtering)
+        (_, Some(rust_log)) => EnvFilter::builder()
+            .parse(rust_log)
+            .map_err(|e| anyhow::anyhow!("invalid RUST_LOG: {}", e))
+            .with_context(|| "failed to create env filter"),
+        // Explicit level, no RUST_LOG → catch-all at that level
+        (Some(level), None) => Ok(EnvFilter::builder()
+            .with_default_directive(level.into())
+            .from_env_lossy()),
+        // Neither set → CORE=info, third-party crates at WARN to suppress noise
+        (None, None) => Ok(EnvFilter::builder()
+            .parse_lossy(format!("{LOG_TARGET}=info,warn"))),
+    }
 }
 
 fn parse_static_filter(level: LevelFilter) -> Result<EnvFilter, anyhow::Error> {
