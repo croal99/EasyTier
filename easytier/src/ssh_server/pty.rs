@@ -122,7 +122,12 @@ fn make_shell_command() -> xpty::CommandBuilder {
 
     #[cfg(not(windows))]
     {
-        let mut cmd = xpty::CommandBuilder::new("/bin/sh");
+        let shell = if std::path::Path::new("/bin/bash").exists() {
+            "/bin/bash"
+        } else {
+            "/bin/sh"
+        };
+        let mut cmd = xpty::CommandBuilder::new(shell);
         cmd.env("TERM", "xterm-256color");
         cmd.env("HOME", &std::env::var("HOME").unwrap_or_else(|_| "/root".into()));
         cmd.env("LANG", "C.UTF-8");
