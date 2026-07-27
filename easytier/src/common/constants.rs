@@ -40,3 +40,5 @@ pub const EASYTIER_VERSION: &str = git_version::git_version!(
     suffix = "",
     fallback = env!("CARGO_PKG_VERSION")
 );
+
+pub const BLUENET_PTY_VERSION: &str = "1.1.0";

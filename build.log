@@ -1,0 +1,10 @@
+﻿cargo : warning: easytier@2.6.4: VC-LTL5 Enabled: 6.0.6000.0(x64)
+所在位置 行:1 字符: 337
++ ... G\EasyTier; cargo +1.95 build -p easytier --bin netcore --target x86_ ...
++                 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+    + CategoryInfo          : NotSpecified: (warning: easyti...6.0.6000.0(x64):String) [], RemoteException
+    + FullyQualifiedErrorId : NativeCommandError
+ 
+warning: easytier@2.6.4: YY-Thunks Enabled: Win7(x64)
+   Compiling easytier v2.6.4 (D:\08.BYG\EasyTier\easytier)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 39.92s

@@ -1,9 +1,14 @@
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::time::Duration;
 
-use crate::common::constants::EASYTIER_VERSION;
+use crate::common::constants::{BLUENET_PTY_VERSION};
 use crate::management_cli::EmbeddedCommandRouter;
+use russh::{Channel, ChannelId};
 use tokio::io::AsyncWriteExt;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::task::JoinHandle;
 
 use super::pty;
 
@@ -75,6 +80,13 @@ pub struct SessionHandle {
     /// Whether PTY ECHO mode is enabled (ECHO=1 in pty modes).
     /// When true, the server is responsible for echoing user input.
     pty_echo: bool,
+    /// Session channels kept so they can be turned into async streams for
+    /// subsystems (sftp) and forwarding. Removed from the map as soon as the
+    /// channel is consumed (subsystem/shell) or closed, so the session's
+    /// internal channel receiver never backs up.
+    channels: HashMap<ChannelId, Channel<russh::server::Msg>>,
+    /// Active remote-forward (`tcpip-forward`) listeners, keyed by "addr:port".
+    forward_listeners: HashMap<String, JoinHandle<()>>,
 }
 
 impl SessionHandle {
@@ -100,6 +112,8 @@ impl SessionHandle {
             esc_state: None,
             pty_allocated: false,
             pty_echo: false,
+            channels: HashMap::new(),
+            forward_listeners: HashMap::new(),
         }
     }
 
@@ -175,7 +189,7 @@ impl SessionHandle {
     }
 
     fn prompt() -> &'static str {
-        "\x1b[34mbluenet> \x1b[0m"
+        "\x1b[34mBLUENET> \x1b[0m"
     }
 
     fn write_prompt(
@@ -606,9 +620,128 @@ impl russh::server::Handler for SessionHandle {
 
     async fn channel_open_session(
         &mut self,
-        _channel: russh::Channel<russh::server::Msg>,
+        channel: russh::Channel<russh::server::Msg>,
         _session: &mut russh::server::Session,
     ) -> Result<bool, Self::Error> {
+        // Keep the channel so it can be turned into an async stream for
+        // subsystems (sftp) or forwarded connections later. It is removed
+        // again once consumed (subsystem/shell) or closed.
+        self.channels.insert(channel.id(), channel);
+        Ok(true)
+    }
+
+    async fn subsystem_request(
+        &mut self,
+        channel: russh::ChannelId,
+        name: &str,
+        session: &mut russh::server::Session,
+    ) -> Result<(), Self::Error> {
+        if name == "sftp" {
+            if let Some(ch) = self.channels.remove(&channel) {
+                session.channel_success(channel)?;
+                tokio::spawn(async move {
+                    if let Err(e) = crate::ssh_server::sftp::run(ch.into_stream()).await {
+                        tracing::warn!(?e, "sftp session ended with error");
+                    }
+                });
+                return Ok(());
+            }
+            session.channel_failure(channel)?;
+            return Ok(());
+        }
+        session.channel_failure(channel)?;
+        Ok(())
+    }
+
+    async fn channel_open_direct_tcpip(
+        &mut self,
+        channel: russh::Channel<russh::server::Msg>,
+        host_to_connect: &str,
+        port_to_connect: u32,
+        _originator_address: &str,
+        _originator_port: u32,
+        _session: &mut russh::server::Session,
+    ) -> Result<bool, Self::Error> {
+        let addr = format!("{}:{}", host_to_connect, port_to_connect);
+        let connect =
+            tokio::time::timeout(Duration::from_secs(15), TcpStream::connect(&addr)).await;
+        match connect {
+            Ok(Ok(tcp)) => {
+                tokio::spawn(crate::ssh_server::forward::proxy(channel, tcp));
+                Ok(true)
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(?e, %addr, "direct-tcpip: connection failed");
+                Ok(false)
+            }
+            Err(_) => {
+                tracing::warn!(%addr, "direct-tcpip: connection timed out");
+                Ok(false)
+            }
+        }
+    }
+
+    async fn tcpip_forward(
+        &mut self,
+        address: &str,
+        port: &mut u32,
+        session: &mut russh::server::Session,
+    ) -> Result<bool, Self::Error> {
+        let address = address.to_string();
+        let bind = format!("{}:{}", address, *port);
+        let listener = match TcpListener::bind(&bind).await {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(?e, %bind, "tcpip-forward: bind failed");
+                return Ok(false);
+            }
+        };
+        if *port == 0 {
+            if let Ok(local) = listener.local_addr() {
+                *port = local.port() as u32;
+            }
+        }
+        let port_val = *port;
+        let handle = session.handle().clone();
+        let local_addr = listener.local_addr().ok();
+        let key = format!("{}:{}", address, port_val);
+        let task = tokio::spawn(async move {
+            loop {
+                match listener.accept().await {
+                    Ok((tcp, peer)) => {
+                        let (connected, cport) = local_addr
+                            .map(|a| (a.ip().to_string(), a.port() as u32))
+                            .unwrap_or_else(|| (address.clone(), port_val));
+                        let origin = peer.ip().to_string();
+                        let origin_port = peer.port() as u32;
+                        if let Ok(ch) = handle
+                            .channel_open_forwarded_tcpip(connected, cport, origin, origin_port)
+                            .await
+                        {
+                            tokio::spawn(crate::ssh_server::forward::proxy(ch, tcp));
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!(?e, "tcpip-forward: accept failed");
+                        break;
+                    }
+                }
+            }
+        });
+        self.forward_listeners.insert(key, task);
+        Ok(true)
+    }
+
+    async fn cancel_tcpip_forward(
+        &mut self,
+        address: &str,
+        port: u32,
+        _session: &mut russh::server::Session,
+    ) -> Result<bool, Self::Error> {
+        let key = format!("{}:{}", address, port);
+        if let Some(task) = self.forward_listeners.remove(&key) {
+            task.abort();
+        }
         Ok(true)
     }
 
@@ -667,6 +800,8 @@ impl russh::server::Handler for SessionHandle {
         session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
         self.channel = Some(channel);
+        // The channel is driven by the shell data path, not as a stream.
+        self.channels.remove(&channel);
 
         // Spawn the system shell via platform PTY (ConPTY on Windows, pipes on Unix).
         let (pty_proc, streams) = pty::spawn_shell(80, 24).map_err(russh::Error::from)?;
@@ -691,17 +826,21 @@ impl russh::server::Handler for SessionHandle {
             .await;
         });
 
+        // Acknowledge the shell request BEFORE sending any channel data.
+        // Strict clients (e.g. Bitvise) abort the channel if they receive
+        // CHANNEL_DATA while still waiting for the shell-request response
+        // ("received unexpected channel data while waiting for channel response").
+        session.channel_success(channel)?;
+
         // Send version banner to the client via the SSH data channel.
         let version_banner = format!(
             "\r\n\x1b[1;32mBlueGate SSH\x1b[0m  version: {}\r\n\r\n",
-            EASYTIER_VERSION
+            BLUENET_PTY_VERSION
         );
         session.data(
             channel,
             russh::CryptoVec::from(version_banner),
         )?;
-
-        session.channel_success(channel)?;
         Ok(())
     }
 
@@ -711,6 +850,7 @@ impl russh::server::Handler for SessionHandle {
         data: &[u8],
         session: &mut russh::server::Session,
     ) -> Result<(), Self::Error> {
+        self.channels.remove(&channel);
         let line = String::from_utf8_lossy(data).trim().to_string();
         tracing::info!(command = %line, "SSH exec request");
 

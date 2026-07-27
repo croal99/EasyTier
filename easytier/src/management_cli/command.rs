@@ -128,7 +128,7 @@ fn parse_bluenet(words: &[String]) -> anyhow::Result<ParsedCommand> {
     match action {
         "on" => Ok(ParsedCommand::StartNetwork),
         "off" => Ok(ParsedCommand::StopNetwork),
-        _ => anyhow::bail!("unknown bluenet subcommand: {action} (use on|off)"),
+        _ => anyhow::bail!("unknown  subcommand: {action} (use on|off)"),
     }
 }
 

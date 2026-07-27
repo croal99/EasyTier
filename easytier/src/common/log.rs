@@ -105,6 +105,20 @@ macro_rules! log_layer {
     };
 }
 
+/// Drop benign but noisy third-party logs emitted on startup:
+///  - `russh_keys` DEBUG dump of the host key algorithm OID (`pkcs8.rs:43`)
+///  - `russh_cryptovec::platform::error` WARN about failing to `VirtualUnlock`
+///    memory pages (harmless on Windows; the crypto buffer is still used safely)
+fn suppress_noisy(metadata: &Metadata<'_>) -> bool {
+    if metadata.target() == "russh_cryptovec::platform::error" {
+        return false;
+    }
+    if metadata.target().starts_with("russh_keys") && *metadata.level() == Level::DEBUG {
+        return false;
+    }
+    true
+}
+
 pub fn init(
     config: impl LoggingConfigLoader,
     reload: bool,
@@ -142,8 +156,9 @@ fn console_layers(default_level: Option<LevelFilter>) -> anyhow::Result<Vec<BoxL
         return Ok(layers);
     }
 
-    let (console_filter, _) =
-        tracing_subscriber::reload::Layer::new(parse_env_filter(default_level)?);
+    let (console_filter, _) = tracing_subscriber::reload::Layer::new(
+        parse_env_filter(default_level)?.and(filter_fn(suppress_noisy)),
+    );
 
     let (stdout, stderr) = cfg_select! {
         test => {{
@@ -199,8 +214,9 @@ fn file_layers(
         return Ok((layers, None));
     }
 
-    let (file_filter, file_filter_reloader) =
-        tracing_subscriber::reload::Layer::<_, Registry>::new(parse_file_filter(level)?);
+    let (file_filter, file_filter_reloader) = tracing_subscriber::reload::Layer::<_, Registry>::new(
+        parse_file_filter(level)?.and(filter_fn(suppress_noisy)),
+    );
 
     let layer = |wrapper| {
         layer()
@@ -258,7 +274,7 @@ fn file_layers(
                 }
             };
 
-            let mut new_filter = match parse_file_filter(parsed_level) {
+            let mut new_filter = match parse_file_filter(parsed_level).map(|f| f.and(filter_fn(suppress_noisy))) {
                 Ok(filter) => Some(filter),
                 Err(e) => {
                     error!("Failed to build new log filter for {:?}: {:?}", lf, e);

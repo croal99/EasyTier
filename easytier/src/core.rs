@@ -1665,7 +1665,7 @@ pub async fn main() -> ExitCode {
         log::warn!("ssh server disabled, exiting...");
     }
 
-    log::info!("Stopping easytier...");
+    log::info!("Stopping...");
     set_prof_active(false);
 
     ExitCode::from(ret_code)
