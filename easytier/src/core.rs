@@ -143,9 +143,6 @@ struct Cli {
 
     #[arg(long, env = "ET_SSH_SERVER", default_value_t = true)]
     ssh_server: bool,
-
-    #[arg(long, env = "ET_SSH_LISTEN", default_value = "127.0.0.1:5922")]
-    ssh_listen: SocketAddr,
 }
 
 #[derive(Parser, Debug, Default, PartialEq, Eq)]
@@ -1638,7 +1635,7 @@ pub async fn main() -> ExitCode {
     if cli.ssh_server {
         let controller = CoreRuntimeController::shared();
         let router = Arc::new(EmbeddedCommandRouter::new(controller.clone()));
-        let ssh = SshServer::new(cli.ssh_listen, router);
+        let ssh = SshServer::new(router);
         tokio::spawn(async move {
             let _ = ssh.serve().await;
         });

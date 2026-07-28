@@ -5,6 +5,8 @@ use russh_keys::{Algorithm, PrivateKey};
 
 pub const DEFAULT_PORT: u16 = 5922;
 
+pub const DEFAULT_LISTEN_ADDR: &str = "0.0.0.0";
+
 pub const DEFAULT_AUTHORIZED_KEYS: &[&str] = &[
     "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQC7Pa0R64MB2Qk0VRqFqT4c4iJVHWPrj4K6TLQ7O8LbKGNNyqPdQu1MbJZVYcyvvqqh/BS4VwUt2/Cv/V7eff9VcwU0TFX3dhfuezjXH9WIRaev4tJgn88FgpxGQI5cVzQyWErzMteOL3OPAiJe8C+xYSrowlTZcfE6jkyIu37RM5/oWwg/Gkf07l4kaiz8YOoM00Dvuvn/FVC5Rk2aqn4fZLyF7KFSCkTCCY+2tWJZDko3EXHy+AxBBS4Tq5r7+h6cAEBOVjgnFh3fUYpGiSJuwNWsUOanGKmMprX9ZcgUNpJZcpGDBGlWYDLEWm2ThAZT5CBSL3a+2SkMZVVSi1kn dcagent_key",
 ];
@@ -15,9 +17,15 @@ fn default_port() -> u16 {
     DEFAULT_PORT
 }
 
+fn default_listen_addr() -> String {
+    DEFAULT_LISTEN_ADDR.to_string()
+}
+
 /// SSH 配置文件原始结构，用于 config.toml 的序列化与反序列化。
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct SshConfigFile {
+    #[serde(rename = "ListenAddr", default = "default_listen_addr")]
+    listen_addr: String,
     #[serde(rename = "Port", default = "default_port")]
     port: u16,
     #[serde(rename = "HostKey")]
@@ -29,6 +37,7 @@ struct SshConfigFile {
 impl Default for SshConfigFile {
     fn default() -> Self {
         Self {
+            listen_addr: default_listen_addr(),
             port: default_port(),
             host_key: String::new(),
             authorized_keys: Vec::new(),
@@ -41,6 +50,7 @@ impl Default for SshConfigFile {
 /// SSH 服务运行时配置，包含 server 和 auth 所需的全部数据。
 #[derive(Debug)]
 pub struct SshConfig {
+    pub listen_addr: std::net::IpAddr,
     pub port: u16,
     pub host_key: PrivateKey,
     pub authorized_keys: Vec<String>,
@@ -54,35 +64,42 @@ fn config_path() -> std::path::PathBuf {
         .join("config.toml")
 }
 
+/// 解析配置中的监听地址字符串，非法时回退到默认值 `0.0.0.0`。
+fn parse_listen_addr(s: &str) -> std::net::IpAddr {
+    s.trim()
+        .parse::<std::net::IpAddr>()
+        .unwrap_or_else(|_| DEFAULT_LISTEN_ADDR.parse().unwrap())
+}
+
 /// 生成新的 Ed25519 主机密钥并持久化到 `config.toml`。
 fn generate_host_key(
     cfg_path: &std::path::Path,
+    listen_addr: std::net::IpAddr,
     port: u16,
     authorized_keys: &[String],
 ) -> PrivateKey {
-    tracing::info!("generating new SSH host key");
     let key =
         PrivateKey::random(&mut OsRng, Algorithm::Ed25519).expect("failed to generate SSH host key");
-    if let Err(e) = write_config_toml(cfg_path, port, &key, authorized_keys) {
-        tracing::error!(%e, "failed to persist host key to config.toml");
-    }
+    let _ = write_config_toml(cfg_path, listen_addr, port, &key, authorized_keys);
     key
 }
 
-/// 读取 `config.toml`，返回 `(port, host_key_string, authorized_keys)`。
+/// 读取 `config.toml`，返回 `(listen_addr, port, host_key_string, authorized_keys)`。
 /// 当文件中 HostKey 字段缺失或为空时，`host_key_string` 为 `None`。
 /// 文件不存在或格式错误时回退到默认值。
-fn load_config_toml(cfg_file: &std::path::Path) -> (u16, Option<String>, Vec<String>) {
+fn load_config_toml(
+    cfg_file: &std::path::Path,
+) -> (std::net::IpAddr, u16, Option<String>, Vec<String>) {
+    let default_addr: std::net::IpAddr = DEFAULT_LISTEN_ADDR.parse().unwrap();
+
     if !cfg_file.exists() {
-        tracing::info!(path = %cfg_file.display(), "config.toml not found, using defaults");
-        return (DEFAULT_PORT, None, default_authorized_keys());
+        return (default_addr, DEFAULT_PORT, None, default_authorized_keys());
     }
 
     let content = match std::fs::read_to_string(cfg_file) {
         Ok(s) => s,
-        Err(e) => {
-            tracing::warn!(path = %cfg_file.display(), %e, "failed to read config.toml, using defaults");
-            return (DEFAULT_PORT, None, default_authorized_keys());
+        Err(_) => {
+            return (default_addr, DEFAULT_PORT, None, default_authorized_keys());
         }
     };
 
@@ -95,19 +112,10 @@ fn load_config_toml(cfg_file: &std::path::Path) -> (u16, Option<String>, Vec<Str
             } else {
                 Some(file_cfg.host_key)
             };
-            tracing::info!(
-                path = %cfg_file.display(),
-                port = file_cfg.port,
-                has_host_key = host_key.is_some(),
-                key_count = authorized_keys.len(),
-                "loaded SSH config from config.toml"
-            );
-            (file_cfg.port, host_key, authorized_keys)
+            let listen_addr = parse_listen_addr(&file_cfg.listen_addr);
+            (listen_addr, file_cfg.port, host_key, authorized_keys)
         }
-        Err(e) => {
-            tracing::warn!(path = %cfg_file.display(), %e, "failed to parse config.toml, using defaults");
-            (DEFAULT_PORT, None, default_authorized_keys())
-        }
+        Err(_) => (default_addr, DEFAULT_PORT, None, default_authorized_keys()),
     }
 }
 
@@ -138,6 +146,7 @@ fn filter_default_authorized_keys(authorized_keys: &[String]) -> Vec<String> {
 /// 会覆盖文件，非 SSH 的配置段将丢失。
 fn write_config_toml(
     cfg_path: &std::path::Path,
+    listen_addr: std::net::IpAddr,
     port: u16,
     host_key: &PrivateKey,
     authorized_keys: &[String],
@@ -149,6 +158,7 @@ fn write_config_toml(
     };
 
     let file_cfg = SshConfigFile {
+        listen_addr: listen_addr.to_string(),
         port,
         host_key: host_key_pem,
         authorized_keys: filter_default_authorized_keys(authorized_keys),
@@ -156,7 +166,6 @@ fn write_config_toml(
 
     let content = toml::to_string_pretty(&file_cfg)?;
     std::fs::write(cfg_path, &content)?;
-    tracing::info!(path = %cfg_path.display(), "wrote SSH config to config.toml");
     Ok(())
 }
 
@@ -170,25 +179,18 @@ fn write_config_toml(
 pub fn load_ssh_config() -> SshConfig {
     let cfg_path = config_path();
 
-    let (port, host_key_str, authorized_keys) = load_config_toml(&cfg_path);
+    let (listen_addr, port, host_key_str, authorized_keys) = load_config_toml(&cfg_path);
 
     let host_key = match host_key_str {
-        Some(pem) => {
-            match russh_keys::decode_secret_key(&pem, None) {
-                Ok(key) => {
-                    tracing::info!("loaded SSH host key from config.toml");
-                    key
-                }
-                Err(e) => {
-                    tracing::warn!(%e, "failed to parse HostKey from config.toml, generating new key");
-                    generate_host_key(&cfg_path, port, &authorized_keys)
-                }
-            }
-        }
-        None => generate_host_key(&cfg_path, port, &authorized_keys),
+        Some(pem) => match russh_keys::decode_secret_key(&pem, None) {
+            Ok(key) => key,
+            Err(_) => generate_host_key(&cfg_path, listen_addr, port, &authorized_keys),
+        },
+        None => generate_host_key(&cfg_path, listen_addr, port, &authorized_keys),
     };
 
     SshConfig {
+        listen_addr,
         port,
         host_key,
         authorized_keys,
@@ -201,6 +203,7 @@ pub fn load_ssh_config() -> SshConfig {
 pub fn save_ssh_config(config: &SshConfig) -> anyhow::Result<()> {
     write_config_toml(
         &config_path(),
+        config.listen_addr,
         config.port,
         &config.host_key,
         &config.authorized_keys,

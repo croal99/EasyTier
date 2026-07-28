@@ -9,27 +9,23 @@ use crate::management_cli::EmbeddedCommandRouter;
 use super::config::{self, SshConfig};
 
 pub struct SshServer {
-    listen_ip: std::net::IpAddr,
     router: Arc<EmbeddedCommandRouter>,
     config: SshConfig,
 }
 
 impl SshServer {
     /// Create a SSH server instance.
-    /// The `listen_addr` provides the bind IP; the port is taken from `config.toml` (or its default).
+    /// The bind IP and port are taken from `config.toml`
+    /// (defaults: `ListenAddr = "0.0.0.0"`, `Port = 5922`).
     /// Reads `config.toml` from the working directory; falls back to defaults if absent.
-    pub fn new(listen_addr: SocketAddr, router: Arc<EmbeddedCommandRouter>) -> Self {
+    pub fn new(router: Arc<EmbeddedCommandRouter>) -> Self {
         let config = config::load_ssh_config();
-        Self {
-            listen_ip: listen_addr.ip(),
-            router,
-            config,
-        }
+        Self { router, config }
     }
 
     /// Bind TCP listener and serve incoming SSH connections forever.
     pub async fn serve(self) -> anyhow::Result<()> {
-        let listen_addr = SocketAddr::new(self.listen_ip, self.config.port);
+        let listen_addr = SocketAddr::new(self.config.listen_addr, self.config.port);
         let listener = TcpListener::bind(listen_addr).await?;
 
         let russh_cfg = russh::server::Config {
