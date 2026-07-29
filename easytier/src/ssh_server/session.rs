@@ -833,14 +833,18 @@ impl russh::server::Handler for SessionHandle {
         session.channel_success(channel)?;
 
         // Send version banner to the client via the SSH data channel.
-        let version_banner = format!(
-            "\r\n\x1b[1;32mBlueGate SSH\x1b[0m  version: {}\r\n\r\n",
-            BLUENET_PTY_VERSION
-        );
-        session.data(
-            channel,
-            russh::CryptoVec::from(version_banner),
-        )?;
+        // Only for interactive sessions (a PTY was allocated). Skip it for
+        // non-interactive shell requests so programmatic output is not polluted.
+        if self.pty_allocated {
+            let version_banner = format!(
+                "\r\n\x1b[1;32mBlueGate SSH\x1b[0m  version: {}\r\n\r\n",
+                BLUENET_PTY_VERSION
+            );
+            session.data(
+                channel,
+                russh::CryptoVec::from(version_banner),
+            )?;
+        }
         Ok(())
     }
 
