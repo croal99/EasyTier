@@ -413,8 +413,14 @@ impl SessionHandle {
         data: &[u8],
         session: &mut russh::server::Session,
     ) -> Result<bool, russh::Error> {
-        // When a PTY is allocated with ECHO=0 the client handles local echo.
-        let should_echo = !self.pty_allocated || self.pty_echo;
+        // The Bluenet embedded CLI implements its own line editor without a
+        // real PTY driver behind it, so the server MUST echo the user's input
+        // itself. Unlike the system-shell path (where bash/readline does the
+        // echoing), here the only thing that can echo is this server. Do not
+        // gate echo on the client's ECHO terminal-mode bit — Bitvise and some
+        // other clients negotiate ECHO=0 on the PTY, which would otherwise
+        // leave the built-in CLI silently non-echoing.
+        let should_echo = true;
 
         for &byte in data.iter() {
             // ── ESC-sequence parser ────────────────────────────────
